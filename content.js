@@ -60,12 +60,12 @@ async function start() {
       if (data.type === 'result' && data.vicios.length > 0) {
         count += data.vicios.length;
         chrome.runtime.sendMessage({ type: 'COUNT_UPDATE', count });
-        // Agenda mutes baseados nos timestamps
+        // Agenda mutes nos timestamps corretos (audio ainda no delay buffer)
         for (const v of data.vicios) {
-          console.log(`[AudioCleaner] Mutando: "${v.word}" ${v.start}->${v.end}s`);
+          console.log(`[AudioCleaner] Agendando mute: "${v.word}" ${v.start}->${v.end}s`);
+          const duracao = (v.end - v.start) * 1000;
+          agendarMute(v.start, duracao);
         }
-        // Muta agora (o chunk ja foi processado antes de tocar)
-        mutarVideo(video, 400 * data.vicios.length);
       }
     };
 
@@ -73,12 +73,20 @@ async function start() {
     const stream = video.captureStream();
     audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
     const source = audioCtx.createMediaStreamSource(stream);
+
+    // DelayNode segura o audio enquanto servidor processa (~3s)
+    const delayNode = audioCtx.createDelay(5.0);
+    delayNode.delayTime.value = CHUNK_SECONDS; // atraso = tamanho do chunk
+
     gainNode = audioCtx.createGain();
     gainNode.gain.value = 1;
-    source.connect(gainNode);
+
+    // Fluxo: source → delay → gain → speakers
+    source.connect(delayNode);
+    delayNode.connect(gainNode);
     gainNode.connect(audioCtx.destination);
 
-    // Grava chunks e envia para o servidor
+    // Grava direto da source (sem delay) e envia para servidor
     iniciarGravacao(source);
 
     active = true;
@@ -122,16 +130,21 @@ function iniciarGravacao(source) {
   scriptProc.connect(audioCtx.destination);
 }
 
-function mutarVideo(video, durationMs) {
-  if (gainNode && audioCtx) {
-    gainNode.gain.cancelScheduledValues(audioCtx.currentTime);
-    gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.02);
-    setTimeout(() => {
-      if (gainNode && audioCtx) {
-        gainNode.gain.linearRampToValueAtTime(1, audioCtx.currentTime + 0.05);
-      }
-    }, durationMs);
-  }
+let chunkStartTime = null; // quando o chunk atual comeou a ser capturado
+
+function agendarMute(startSeg, durationMs) {
+  if (!gainNode || !audioCtx || chunkStartTime === null) return;
+  // O chunk foi capturado ha CHUNK_SECONDS atras
+  // O audio correspondente toca agora (esta no delay buffer)
+  // startSeg e relativo ao inicio do chunk
+  const now = audioCtx.currentTime;
+  const muteAt    = now + startSeg;           // quando muta
+  const unmuteAt  = muteAt + durationMs/1000 + 0.1; // quando desmuta
+
+  gainNode.gain.setValueAtTime(1,    muteAt - 0.02);
+  gainNode.gain.linearRampToValueAtTime(0, muteAt);
+  gainNode.gain.setValueAtTime(0,    unmuteAt - 0.05);
+  gainNode.gain.linearRampToValueAtTime(1, unmuteAt);
 }
 
 function stop() {
