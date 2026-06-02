@@ -1,7 +1,7 @@
-// Background Service Worker (MV3)
-// Coordena tabCapture e offscreen document
+// Background Service Worker (MV3) - simplificado
+// Apenas coordena mensagens entre popup e content script
 
-let state = { active: false, count: 0 };
+let state = { active: false, count: 0, tabId: null };
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GET_STATE') {
@@ -10,12 +10,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'START') {
-    startCapture(msg.tics).then(ok => sendResponse({ ok }));
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (!tabs[0]) { sendResponse({ ok: false }); return; }
+      state.tabId = tabs[0].id;
+      chrome.tabs.sendMessage(state.tabId, { type: 'START', tics: msg.tics }, (resp) => {
+        state.active = true;
+        state.count  = 0;
+        sendResponse({ ok: true });
+      });
+    });
     return true;
   }
 
   if (msg.type === 'STOP') {
-    stopCapture().then(() => sendResponse({ ok: true }));
+    if (state.tabId) {
+      chrome.tabs.sendMessage(state.tabId, { type: 'STOP' });
+    }
+    state.active = false;
+    sendResponse({ ok: true });
     return true;
   }
 
@@ -25,61 +37,3 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     chrome.runtime.sendMessage({ type: 'COUNT_UPDATE', count: state.count }).catch(() => {});
   }
 });
-
-async function startCapture(tics) {
-  try {
-    // Cria offscreen document para processar audio
-    await ensureOffscreen();
-
-    // Pega stream ID da aba atual
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const streamId = await new Promise((resolve, reject) => {
-      chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id }, (id) => {
-        if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
-        else resolve(id);
-      });
-    });
-
-    // Muta a aba original (offscreen vai reproduzir o audio processado)
-    await chrome.tabs.update(tab.id, { muted: true });
-    state.mutedTabId = tab.id;
-
-    // Envia para offscreen processar
-    await chrome.runtime.sendMessage({
-      type: 'OFFSCREEN_START',
-      streamId,
-      tics: tics || ['né', 'né?', 'então', 'pessoal', 'ok', 'é', 'e']
-    });
-
-    state.active = true;
-    state.count  = 0;
-    return true;
-  } catch (e) {
-    console.error('[BG] Erro ao iniciar:', e);
-    return false;
-  }
-}
-
-async function stopCapture() {
-  try {
-    await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
-    await chrome.offscreen.closeDocument();
-    // Desmuta a aba original
-    if (state.mutedTabId) {
-      await chrome.tabs.update(state.mutedTabId, { muted: false });
-      state.mutedTabId = null;
-    }
-  } catch (e) {}
-  state.active = false;
-}
-
-async function ensureOffscreen() {
-  const existing = await chrome.offscreen.hasDocument();
-  if (!existing) {
-    await chrome.offscreen.createDocument({
-      url: 'offscreen.html',
-      reasons: ['USER_MEDIA'],
-      justification: 'Processar audio da aba para remover vicios de linguagem'
-    });
-  }
-}
