@@ -1,20 +1,27 @@
-// Content Script - roda diretamente na pagina
-// Captura audio do video via captureStream() e usa Web Speech API
+// Audio Cleaner Extension - Content Script
+// Captura audio do video e envia para servidor Python via WebSocket
 
-let recognition = null;
-let audioCtx = null;
-let gainNode = null;
-let muteTimeout = null;
-let count = 0;
-let tics = ['né', 'né?', 'então', 'pessoal', 'ok'];
-let eThreshold = true;
-let active = false;
+const WS_URL = "ws://localhost:8765";
+const CHUNK_SECONDS  = 3;
+const ADVANCE_SECONDS = 2;
+const SAMPLE_RATE    = 16000;
+
+let audioCtx    = null;
+let gainNode    = null;
+let ws          = null;
+let active      = false;
+let count       = 0;
+let recording   = false;
+let scriptProc  = null;
+let audioBuffer = [];
+let muteQueue   = [];
+
+// ── Mensagens do popup/background ─────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'START') {
-    tics = msg.tics || tics;
-    start();
-    sendResponse({ ok: true });
+    start().then(ok => sendResponse({ ok }));
+    return true;
   }
   if (msg.type === 'STOP') {
     stop();
@@ -25,124 +32,114 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-function findVideo() {
-  // Busca no frame atual (all_frames:true garante injecao em iframes tambem)
-  return document.querySelector('video');
-}
+// ── Inicio ────────────────────────────────────────────────────────────────────
 
-function start() {
-  if (active) return;
-  active = true;
-  count = 0;
+async function start() {
+  if (active) return true;
 
-  const video = findVideo();
+  const video = document.querySelector('video');
   if (!video) {
-    console.warn('[AudioCleaner] Nenhum video encontrado na pagina');
-    startRecognitionOnly();
-    return;
+    console.warn('[AudioCleaner] Nenhum video neste frame');
+    return false;
   }
 
+  console.log('[AudioCleaner] Video encontrado! Iniciando...');
+
   try {
-    // Captura stream do video
+    // Conecta ao servidor Python
+    ws = new WebSocket(WS_URL);
+    await new Promise((resolve, reject) => {
+      ws.onopen  = resolve;
+      ws.onerror = reject;
+      setTimeout(reject, 3000);
+    });
+    console.log('[AudioCleaner] Conectado ao servidor Python!');
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'result' && data.vicios.length > 0) {
+        count += data.vicios.length;
+        chrome.runtime.sendMessage({ type: 'COUNT_UPDATE', count });
+        // Agenda mutes baseados nos timestamps
+        for (const v of data.vicios) {
+          console.log(`[AudioCleaner] Mutando: "${v.word}" ${v.start}->${v.end}s`);
+        }
+        // Muta agora (o chunk ja foi processado antes de tocar)
+        mutarVideo(video, 400 * data.vicios.length);
+      }
+    };
+
+    // Captura audio do video
     const stream = video.captureStream();
-    audioCtx = new AudioContext();
+    audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
     const source = audioCtx.createMediaStreamSource(stream);
     gainNode = audioCtx.createGain();
     gainNode.gain.value = 1;
     source.connect(gainNode);
     gainNode.connect(audioCtx.destination);
 
-    // Usa o mesmo stream para reconhecimento de fala
-    startRecognition(stream);
-    console.log('[AudioCleaner] Iniciado com captureStream');
+    // Grava chunks e envia para o servidor
+    iniciarGravacao(source);
+
+    active = true;
+    count  = 0;
+    console.log('[AudioCleaner] Ativo!');
+    return true;
+
   } catch(e) {
-    console.warn('[AudioCleaner] captureStream falhou, usando microfone:', e);
-    startRecognitionOnly();
+    console.error('[AudioCleaner] Erro ao conectar servidor Python:', e);
+    console.error('Certifique-se que o server.bat esta rodando!');
+    return false;
   }
 }
 
-function startRecognitionOnly() {
-  // Fallback: usa Web Speech API padrao (microfone do sistema)
-  startRecognition(null);
-}
+function iniciarGravacao(source) {
+  const chunkSize   = CHUNK_SECONDS   * SAMPLE_RATE;
+  const advanceSize = ADVANCE_SECONDS * SAMPLE_RATE;
 
-function startRecognition(stream) {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { console.error('[AudioCleaner] Web Speech API nao disponivel'); return; }
+  scriptProc = audioCtx.createScriptProcessor(4096, 1, 1);
+  audioBuffer = [];
 
-  recognition = new SR();
-  recognition.lang = 'pt-BR';
-  recognition.continuous = true;
-  recognition.interimResults = true;
+  scriptProc.onaudioprocess = (e) => {
+    if (!active) return;
+    const samples = e.inputBuffer.getChannelData(0);
+    audioBuffer.push(...samples);
 
-  recognition.onresult = (event) => {
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const transcript = event.results[i][0].transcript.trim().toLowerCase();
+    // Quando acumular chunk completo, envia para servidor
+    if (audioBuffer.length >= chunkSize) {
+      const chunk = new Float32Array(audioBuffer.slice(0, chunkSize));
+      audioBuffer = audioBuffer.slice(advanceSize); // overlap
 
-      // Verifica cada palavra
-      const words = transcript.split(/\s+/);
-      for (const word of words) {
-        const clean = word.replace(/[.,!?;:-]/g, '');
-        const simples = tics.filter(t => !['é','e'].includes(t)).map(t => t.toLowerCase());
-        if (simples.includes(clean)) {
-          console.log(`[AudioCleaner] Vicio: "${clean}"`);
-          mutar(500);
-          notificar();
-          break;
-        }
-      }
-
-      // E longo isolado
-      const limpo = transcript.replace(/[.,!?;:-]/g, '').trim();
-      if (['e','é','ee','éé','eee'].includes(limpo)) {
-        console.log(`[AudioCleaner] E longo: "${limpo}"`);
-        mutar(700);
-        notificar();
+      // Envia como base64
+      const encoded = btoa(String.fromCharCode(...new Uint8Array(chunk.buffer)));
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'audio', audio: encoded }));
       }
     }
   };
 
-  recognition.onerror = (e) => {
-    if (e.error !== 'no-speech') console.warn('[AudioCleaner] Erro:', e.error);
-  };
-  recognition.onend = () => { if (active) recognition.start(); };
-  recognition.start();
+  source.connect(scriptProc);
+  scriptProc.connect(audioCtx.destination);
 }
 
-function mutar(durationMs) {
-  const video = findVideo();
-
-  // Muta via gainNode se disponivel
+function mutarVideo(video, durationMs) {
   if (gainNode && audioCtx) {
     gainNode.gain.cancelScheduledValues(audioCtx.currentTime);
     gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.02);
-    clearTimeout(muteTimeout);
-    muteTimeout = setTimeout(() => {
+    setTimeout(() => {
       if (gainNode && audioCtx) {
         gainNode.gain.linearRampToValueAtTime(1, audioCtx.currentTime + 0.05);
       }
     }, durationMs);
   }
-
-  // Fallback: muta o video diretamente
-  if (video) {
-    video.muted = true;
-    clearTimeout(muteTimeout);
-    muteTimeout = setTimeout(() => { if (video) video.muted = false; }, durationMs);
-  }
-}
-
-function notificar() {
-  count++;
-  chrome.runtime.sendMessage({ type: 'COUNT_UPDATE', count });
 }
 
 function stop() {
-  if (recognition) { recognition.stop(); recognition = null; }
-  if (audioCtx) { audioCtx.close(); audioCtx = null; }
-  gainNode = null;
   active = false;
-  // Desmuta video se estava mutado
-  const video = findVideo();
-  if (video) video.muted = false;
+  if (scriptProc) { scriptProc.disconnect(); scriptProc = null; }
+  if (audioCtx)   { audioCtx.close(); audioCtx = null; }
+  if (ws)         { ws.close(); ws = null; }
+  gainNode   = null;
+  audioBuffer = [];
+  console.log('[AudioCleaner] Parado');
 }
