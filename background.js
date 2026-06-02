@@ -40,6 +40,10 @@ async function startCapture(tics) {
       });
     });
 
+    // Muta a aba original (offscreen vai reproduzir o audio processado)
+    await chrome.tabs.update(tab.id, { muted: true });
+    state.mutedTabId = tab.id;
+
     // Envia para offscreen processar
     await chrome.runtime.sendMessage({
       type: 'OFFSCREEN_START',
@@ -60,6 +64,11 @@ async function stopCapture() {
   try {
     await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
     await chrome.offscreen.closeDocument();
+    // Desmuta a aba original
+    if (state.mutedTabId) {
+      await chrome.tabs.update(state.mutedTabId, { muted: false });
+      state.mutedTabId = null;
+    }
   } catch (e) {}
   state.active = false;
 }
