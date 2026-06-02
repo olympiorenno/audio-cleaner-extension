@@ -1,147 +1,76 @@
-// Audio Cleaner - Background Service Worker
-// Captura audio da aba, detecta vicios via Web Speech API e muta em tempo real
+// Background Service Worker (MV3)
+// Coordena tabCapture e offscreen document
 
-let state = {
-  active: false,
-  tics: ['né', 'né?', 'então', 'pessoal', 'ok'],
-  count: 0,
-  recognition: null,
-  stream: null,
-  audioCtx: null,
-  gainNode: null,
-  muteTimeout: null,
-};
+let state = { active: false, count: 0 };
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GET_STATE') {
-    sendResponse({ active: state.active });
+    sendResponse({ active: state.active, count: state.count });
+    return true;
   }
 
   if (msg.type === 'START') {
-    state.tics = msg.tics || state.tics;
-    startCapture().then(() => sendResponse({ ok: true }));
-    return true; // async
+    startCapture(msg.tics).then(ok => sendResponse({ ok }));
+    return true;
   }
 
   if (msg.type === 'STOP') {
-    stopCapture();
-    sendResponse({ ok: true });
+    stopCapture().then(() => sendResponse({ ok: true }));
+    return true;
   }
 
-  if (msg.type === 'MUTE_TAB') {
-    mutarTab(msg.tabId, msg.duration);
-    sendResponse({ ok: true });
+  if (msg.type === 'COUNT_UPDATE') {
+    state.count = msg.count;
+    // Repassa para o popup
+    chrome.runtime.sendMessage({ type: 'COUNT_UPDATE', count: state.count }).catch(() => {});
   }
 });
 
-async function startCapture() {
+async function startCapture(tics) {
   try {
-    // Captura audio da aba ativa
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    // Cria offscreen document para processar audio
+    await ensureOffscreen();
 
-    const stream = await new Promise((resolve, reject) => {
-      chrome.tabCapture.capture({ audio: true, video: false }, (s) => {
+    // Pega stream ID da aba atual
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const streamId = await new Promise((resolve, reject) => {
+      chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id }, (id) => {
         if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
-        else resolve(s);
+        else resolve(id);
       });
     });
 
-    state.stream  = stream;
-    state.active  = true;
-    state.audioCtx = new AudioContext();
+    // Envia para offscreen processar
+    await chrome.runtime.sendMessage({
+      type: 'OFFSCREEN_START',
+      streamId,
+      tics: tics || ['né', 'né?', 'então', 'pessoal', 'ok', 'é', 'e']
+    });
 
-    const source   = state.audioCtx.createMediaStreamSource(stream);
-    state.gainNode = state.audioCtx.createGain();
-    const dest     = state.audioCtx.destination;
-
-    source.connect(state.gainNode);
-    state.gainNode.connect(dest);
-
-    // Web Speech API para reconhecimento em tempo real
-    startRecognition(tab.id);
-
-    console.log('[AudioCleaner] Iniciado');
+    state.active = true;
+    state.count  = 0;
+    return true;
   } catch (e) {
-    console.error('[AudioCleaner] Erro ao iniciar:', e);
+    console.error('[BG] Erro ao iniciar:', e);
+    return false;
   }
 }
 
-function stopCapture() {
-  if (state.recognition) {
-    state.recognition.stop();
-    state.recognition = null;
-  }
-  if (state.stream) {
-    state.stream.getTracks().forEach(t => t.stop());
-    state.stream = null;
-  }
-  if (state.audioCtx) {
-    state.audioCtx.close();
-    state.audioCtx = null;
-  }
+async function stopCapture() {
+  try {
+    await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
+    await chrome.offscreen.closeDocument();
+  } catch (e) {}
   state.active = false;
-  console.log('[AudioCleaner] Parado');
 }
 
-function startRecognition(tabId) {
-  const recognition = new (self.SpeechRecognition || self.webkitSpeechRecognition)();
-  recognition.lang = 'pt-BR';
-  recognition.continuous = true;
-  recognition.interimResults = true;
-
-  recognition.onresult = (event) => {
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const transcript = event.results[i][0].transcript.trim().toLowerCase();
-      const words = transcript.split(/\s+/);
-
-      // Detecta vicios simples
-      for (const word of words) {
-        const clean = word.replace(/[.,!?;:-]/g, '');
-        const ticsList = state.tics.map(t => t.toLowerCase()).filter(t => t !== 'é' && t !== 'e');
-        if (ticsList.includes(clean)) {
-          console.log(`[AudioCleaner] Vicio detectado: "${clean}"`);
-          mutarGain(400);
-          state.count++;
-          chrome.runtime.sendMessage({ type: 'COUNT_UPDATE', count: state.count });
-          break;
-        }
-      }
-
-      // Detecta "e/é" longo: aparece sozinho no transcript (hesitacao)
-      if (state.tics.includes('é') || state.tics.includes('e')) {
-        const trimmed = transcript.replace(/[.,!?;:-]/g, '').trim();
-        if (trimmed === 'e' || trimmed === 'é' || trimmed === 'ee' || trimmed === 'éé') {
-          console.log(`[AudioCleaner] E longo detectado: "${trimmed}"`);
-          mutarGain(600);
-          state.count++;
-          chrome.runtime.sendMessage({ type: 'COUNT_UPDATE', count: state.count });
-        }
-      }
-    }
-  };
-
-  recognition.onerror = (e) => {
-    if (e.error !== 'no-speech') console.warn('[AudioCleaner] Erro reconhecimento:', e.error);
-  };
-
-  recognition.onend = () => {
-    // Reinicia automaticamente se ainda ativo
-    if (state.active) recognition.start();
-  };
-
-  recognition.start();
-  state.recognition = recognition;
-}
-
-function mutarGain(durationMs) {
-  if (!state.gainNode) return;
-  // Muta com fade suave
-  state.gainNode.gain.linearRampToValueAtTime(0, state.audioCtx.currentTime + 0.02);
-  // Desmuta apos duracao
-  clearTimeout(state.muteTimeout);
-  state.muteTimeout = setTimeout(() => {
-    if (state.gainNode) {
-      state.gainNode.gain.linearRampToValueAtTime(1, state.audioCtx.currentTime + 0.05);
-    }
-  }, durationMs);
+async function ensureOffscreen() {
+  const existing = await chrome.offscreen.hasDocument();
+  if (!existing) {
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['USER_MEDIA'],
+      justification: 'Processar audio da aba para remover vicios de linguagem'
+    });
+  }
 }
