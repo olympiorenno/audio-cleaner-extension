@@ -26,17 +26,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 function findVideo() {
-  // Procura video na pagina e em iframes
-  let video = document.querySelector('video');
-  if (!video) {
-    for (const iframe of document.querySelectorAll('iframe')) {
-      try {
-        video = iframe.contentDocument?.querySelector('video');
-        if (video) break;
-      } catch(e) {}
-    }
-  }
-  return video;
+  // Busca no frame atual (all_frames:true garante injecao em iframes tambem)
+  return document.querySelector('video');
 }
 
 function start() {
