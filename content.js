@@ -1,7 +1,7 @@
 // Audio Cleaner Extension - Content Script
 // Captura audio do video e envia para servidor Python via WebSocket
 
-const WS_URL = "ws://localhost:8765";
+const WS_URL = "ws://127.0.0.1:8765";
 const CHUNK_SECONDS  = 3;
 const ADVANCE_SECONDS = 2;
 const SAMPLE_RATE    = 16000;
