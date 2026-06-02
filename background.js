@@ -94,14 +94,27 @@ function startRecognition(tabId) {
       const transcript = event.results[i][0].transcript.trim().toLowerCase();
       const words = transcript.split(/\s+/);
 
+      // Detecta vicios simples
       for (const word of words) {
-        const clean = word.replace(/[.,!?;:]/g, '');
-        if (state.tics.map(t => t.toLowerCase()).includes(clean)) {
+        const clean = word.replace(/[.,!?;:-]/g, '');
+        const ticsList = state.tics.map(t => t.toLowerCase()).filter(t => t !== 'é' && t !== 'e');
+        if (ticsList.includes(clean)) {
           console.log(`[AudioCleaner] Vicio detectado: "${clean}"`);
-          mutarGain(400); // muta por 400ms
+          mutarGain(400);
           state.count++;
           chrome.runtime.sendMessage({ type: 'COUNT_UPDATE', count: state.count });
           break;
+        }
+      }
+
+      // Detecta "e/é" longo: aparece sozinho no transcript (hesitacao)
+      if (state.tics.includes('é') || state.tics.includes('e')) {
+        const trimmed = transcript.replace(/[.,!?;:-]/g, '').trim();
+        if (trimmed === 'e' || trimmed === 'é' || trimmed === 'ee' || trimmed === 'éé') {
+          console.log(`[AudioCleaner] E longo detectado: "${trimmed}"`);
+          mutarGain(600);
+          state.count++;
+          chrome.runtime.sendMessage({ type: 'COUNT_UPDATE', count: state.count });
         }
       }
     }
