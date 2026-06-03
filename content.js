@@ -7,13 +7,18 @@ let count   = 0;
 let tics    = ['né', 'né?', 'então', 'pessoal', 'ok'];
 let muteTimeout = null;
 
+// Roda apenas no frame principal para evitar conflito de microfone
+const IS_TOP_FRAME = window === window.top;
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'START') {
+    if (!IS_TOP_FRAME) { sendResponse({ ok: false }); return; }
     tics = msg.tics || tics;
     const ok = start();
     sendResponse({ ok });
   }
   if (msg.type === 'STOP') {
+    if (!IS_TOP_FRAME) { sendResponse({ ok: false }); return; }
     stop();
     sendResponse({ ok: true });
   }
