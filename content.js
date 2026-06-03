@@ -105,7 +105,11 @@ function mutar(durationMs) {
 
 function notificar() {
   count++;
-  chrome.runtime.sendMessage({ type: 'COUNT_UPDATE', count }).catch(() => {});
+  try {
+    chrome.runtime.sendMessage({ type: 'COUNT_UPDATE', count });
+  } catch(e) {
+    // Service worker dormiu — normal no MV3, mute continua funcionando
+  }
 }
 
 function stop() {
