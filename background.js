@@ -33,7 +33,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'COUNT_UPDATE') {
     state.count = msg.count;
-    // Repassa para o popup
     chrome.runtime.sendMessage({ type: 'COUNT_UPDATE', count: state.count }).catch(() => {});
+  }
+
+  if (msg.type === 'MUTE_ALL') {
+    // Envia mute para TODOS os frames da aba (inclui iframes com video)
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]) {
+        chrome.tabs.sendMessage(tabs[0].id, {
+          type: 'MUTE_VIDEO',
+          duration: msg.duration
+        }, { frameId: undefined }); // todos os frames
+      }
+    });
   }
 });

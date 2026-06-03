@@ -93,15 +93,32 @@ function start() {
 }
 
 function mutar(durationMs) {
-  // Muta todos os videos da pagina
+  // Muta videos no frame atual
   const videos = document.querySelectorAll('video');
-  videos.forEach(v => { v.muted = true; });
+  if (videos.length > 0) {
+    videos.forEach(v => { v.muted = true; });
+    clearTimeout(muteTimeout);
+    muteTimeout = setTimeout(() => {
+      videos.forEach(v => { v.muted = false; });
+    }, durationMs);
+  }
 
-  clearTimeout(muteTimeout);
-  muteTimeout = setTimeout(() => {
-    videos.forEach(v => { v.muted = false; });
-  }, durationMs);
+  // Pede ao background para mutar em todos os frames (incluindo iframes)
+  try {
+    chrome.runtime.sendMessage({ type: 'MUTE_ALL', duration: durationMs });
+  } catch(e) {}
 }
+
+// Recebe mute do background (quando rodando em iframe)
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === 'MUTE_VIDEO') {
+    const videos = document.querySelectorAll('video');
+    videos.forEach(v => { v.muted = true; });
+    setTimeout(() => {
+      videos.forEach(v => { v.muted = false; });
+    }, msg.duration);
+  }
+});
 
 function notificar() {
   count++;
